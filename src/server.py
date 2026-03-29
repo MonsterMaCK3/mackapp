@@ -161,14 +161,30 @@ def explore(genre: str = "All"):
         if now - cached_time < EXPLORE_CACHE_TTL:
             return cached_data
     try:
-        url = f"https://app.ticketmaster.com/discovery/v2/events.json?classificationName=music&apikey={API_KEY}&size=24&sort=relevance,desc"
-        if GENRES.get(genre): url += f"&genreId={GENRES[genre]}"
-        r = tm_session.get(url, timeout=10).json()
-        events = r.get('_embedded', {}).get('events', [])
+        params = {
+            "classificationName": "music",
+            "apikey": API_KEY,
+            "size": 24,
+            "sort": "relevance,desc"
+        }
+        if GENRES.get(genre):
+            params["genreId"] = GENRES[genre]
+        r = tm_session.get("https://app.ticketmaster.com/discovery/v2/events.json", params=params, timeout=10)
+        if r.status_code != 200:
+            print(f"DEBUG: Explore API returned {r.status_code}")
+            return []
+        data = r.json()
+        if "fault" in data:
+            print(f"DEBUG: Explore API fault: {data['fault'].get('faultstring', 'unknown')}")
+            return []
+        events = data.get('_embedded', {}).get('events', [])
         result = _parse_events(events)
-        _explore_cache[genre] = (now, result)
+        if result:  # Only cache non-empty results to avoid caching errors
+            _explore_cache[genre] = (now, result)
         return result
-    except Exception: return []
+    except Exception as e:
+        print(f"DEBUG: Explore exception: {e}")
+        return []
 
 @app.get("/api/search")
 def search(keyword: str):
@@ -179,12 +195,28 @@ def search(keyword: str):
         if now - cached_time < SEARCH_CACHE_TTL:
             return cached_data
     try:
-        r = tm_session.get(f"https://app.ticketmaster.com/discovery/v2/events.json?keyword={keyword}&apikey={API_KEY}&size=15", timeout=10).json()
-        events = r.get('_embedded', {}).get('events', [])
+        params = {
+            "keyword": keyword,
+            "apikey": API_KEY,
+            "size": 15,
+            "classificationName": "music"
+        }
+        r = tm_session.get("https://app.ticketmaster.com/discovery/v2/events.json", params=params, timeout=10)
+        if r.status_code != 200:
+            print(f"DEBUG: Search API returned {r.status_code} for '{keyword}'")
+            return []
+        data = r.json()
+        if "fault" in data:
+            print(f"DEBUG: Search API fault for '{keyword}': {data['fault'].get('faultstring', 'unknown')}")
+            return []
+        events = data.get('_embedded', {}).get('events', [])
         result = _parse_events(events)
-        _search_cache[cache_key] = (now, result)
+        if result:  # Only cache non-empty results to avoid caching errors
+            _search_cache[cache_key] = (now, result)
         return result
-    except Exception: return []
+    except Exception as e:
+        print(f"DEBUG: Search exception for '{keyword}': {e}")
+        return []
 
 @app.get("/api/scrape")
 async def scrape_trigger(event_id: str, url: str):
