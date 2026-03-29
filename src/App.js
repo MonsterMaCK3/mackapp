@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 
-const socket = io("http://localhost:8000");
+const API_BASE_URL = "http://localhost:8000";
+const socket = io(API_BASE_URL);
 
 export default function App() {
   const [query, setQuery] = useState('');
@@ -9,7 +10,8 @@ export default function App() {
   const [exploreEvents, setExploreEvents] = useState([]); 
   const [tickets, setTickets] = useState([]);
   const [logs, setLogs] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [exploreLoading, setExploreLoading] = useState(false);
+  const [searchLoading, setSearchLoading] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState(null);
   const [selectedGenre, setSelectedGenre] = useState('All');
   const [isConnected, setIsConnected] = useState(false);
@@ -48,47 +50,69 @@ export default function App() {
   };
 
   useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true);
-    fetch(`http://localhost:8000/api/explore?genre=${selectedGenre}`, { signal: controller.signal })
-      .then(res => res.json())
-      .then(data => { 
-        setExploreEvents(data); 
-        setTrendingEvents(data.slice(0, 5)); 
-        setLoading(false); 
-      })
-      .catch(err => {
-        if (err.name !== 'AbortError') setLoading(false);
+    const handleConnect = () => setIsConnected(true);
+    const handleDisconnect = () => setIsConnected(false);
+    const handleSync = (data) => {
+      setSelectedEvent(current => {
+        if (current?.id === data.event_id) {
+          const sorted = [...data.tickets].sort((a, b) => 
+            a.SEC.localeCompare(b.SEC, undefined, { numeric: true, sensitivity: 'base' })
+          );
+          setTickets(sorted);
+        }
+        return current;
       });
-
-    socket.on('connect', () => setIsConnected(true));
-    socket.on('disconnect', () => setIsConnected(false));
-    
-    socket.on('inventory_sync', (data) => {
-      if (selectedEvent?.id === data.event_id) {
-        const sorted = [...data.tickets].sort((a, b) => 
-          a.SEC.localeCompare(b.SEC, undefined, { numeric: true, sensitivity: 'base' })
-        );
-        setTickets(sorted);
-      }
-    });
-
-    socket.on('log', (data) => {
+    };
+    const handleLog = (data) => {
       setLogs(prev => [{ id: Date.now(), ...data, time: data.time || new Date().toLocaleTimeString('en-GB') }, ...prev].slice(0, 50));
       if (data.type === 'SOLD' || data.type === 'SUCCESS') {
         const match = data.msg.match(/\$(\d+\.?\d*)/);
         if (match) setRevenue(prev => prev + parseFloat(match[1]));
       }
-    });
+    };
 
+    socket.on('connect', handleConnect);
+    socket.on('disconnect', handleDisconnect);
+    socket.on('inventory_sync', handleSync);
+    socket.on('log', handleLog);
+
+    return () => {
+      socket.off('connect', handleConnect);
+      socket.off('disconnect', handleDisconnect);
+      socket.off('inventory_sync', handleSync);
+      socket.off('log', handleLog);
+    };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setExploreLoading(true);
+
+    fetch(`${API_BASE_URL}/api/explore?genre=${selectedGenre}`, { signal: controller.signal })
+      .then(res => {
+        if (!res.ok) throw new Error("Network error");
+        return res.json();
+      })
+      .then(data => { 
+        setExploreEvents(data); 
+        setTrendingEvents(data.slice(0, 5)); 
+        setExploreLoading(false); 
+      })
+      .catch(err => {
+        if (err.name !== 'AbortError') {
+          console.error("Explore fetch failed", err);
+          setExploreLoading(false);
+        }
+      });
+
+    return () => controller.abort();
+  }, [selectedGenre]);
+
+  useEffect(() => {
     const handleClickOutside = (e) => { if (searchRef.current && !searchRef.current.contains(e.target)) setShowSearchDrop(false); };
     document.addEventListener("mousedown", handleClickOutside);
-    return () => {
-      controller.abort();
-      socket.off('connect'); socket.off('disconnect'); socket.off('inventory_sync'); socket.off('log');
-      document.removeEventListener("mousedown", handleClickOutside);
-    };
-  }, [selectedEvent?.id, selectedGenre]);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   const handleSelectEvent = (event) => {
     if (!event || !event.url) return;
@@ -99,8 +123,8 @@ export default function App() {
     setShowSearchDrop(false);
     setTickets([]); 
     setActiveTab('inventory');
-    fetch(`http://localhost:8000/api/scrape?event_id=${event.id}&url=${encodeURIComponent(event.url)}`)
-      .catch(() => {});
+    fetch(`${API_BASE_URL}/api/scrape?event_id=${event.id}&url=${encodeURIComponent(event.url)}`)
+      .catch(err => console.error("Scrape trigger failed", err));
   };
 
   const handleQuickCheckout = (ticket) => {
@@ -113,16 +137,19 @@ export default function App() {
 
   const searchEvents = async () => {
     if (!query) return;
-    setLoading(true);
     setEvents([]);
+    setSearchLoading(true);
     setShowSearchDrop(true); 
     try {
-      const res = await fetch(`http://localhost:8000/api/search?keyword=${query}`);
+      const res = await fetch(`${API_BASE_URL}/api/search?keyword=${encodeURIComponent(query)}`);
+      if (!res.ok) throw new Error("Search failed");
       const data = await res.json();
       setEvents(data);
-    } catch {
-      setEvents([]);
-    } finally { setLoading(false); }
+    } catch (err) {
+      console.error(err);
+    } finally { 
+      setSearchLoading(false); 
+    }
   };
 
   return (
@@ -172,13 +199,13 @@ export default function App() {
           {showSearchDrop && (
             <div className="fade-in-slide" style={{...styles.dropdown, background: theme.panel, borderColor: theme.border, transition: 'background 0.5s ease, border 0.5s ease'}}>
               {query ? (
-                loading ? (
+                searchLoading ? (
                   <div style={{padding: 25, textAlign: 'center', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 12}}>
                     <span className="loader"></span>
                     <span style={{fontSize: 10, letterSpacing: 1, fontWeight: 'bold'}}>SYNCING DISCOVERY</span>
                   </div>
                 ) :
-                events.map(e => (
+                events.length > 0 ? events.map(e => (
                   <div key={e.id} className="row-hover" style={styles.dropItem} onClick={() => handleSelectEvent(e)}>
                     <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
                       <img src={e.image} style={{width: 35, height: 35, borderRadius: 4, objectFit: 'cover'}} alt="" />
@@ -191,7 +218,9 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-                ))
+                )) : (
+                  <div style={{padding: 25, textAlign: 'center', fontSize: 11, color: theme.mute}}>Press Enter to search</div>
+                )
               ) : (
                 <>
                   <div style={styles.sectionTitle}>Trending Searches</div>
@@ -237,14 +266,21 @@ export default function App() {
         <main style={{...styles.main, transition: 'all 0.5s ease'}}>
           {activeTab === 'explore' ? (
             <div style={{padding: '30px', overflowY: 'auto', flex: 1}}>
-               <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 20}}>
-                  {exploreEvents.map(event => (
-                    <div key={event.id} className="explore-card" onClick={() => handleSelectEvent(event)} style={{background: theme.panel, borderColor: theme.border, transition: 'all 0.4s ease'}}>
-                      <img src={event.image} style={{width: '100%', height: 150, objectFit: 'cover'}} alt=""/>
-                      <div style={{padding: 15}}><div style={{fontWeight: 'bold', fontSize: 12}}>{event.name}</div></div>
-                    </div>
-                  ))}
-               </div>
+               {exploreLoading ? (
+                 <div style={{display: 'flex', justifyContent: 'center', alignItems: 'center', height: '200px', gap: 12}}>
+                   <span className="loader"></span>
+                   <span style={{fontSize: 10, letterSpacing: 1, fontWeight: 'bold', color: theme.mute}}>LOADING EVENTS</span>
+                 </div>
+               ) : (
+                 <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 20}}>
+                    {exploreEvents.map(event => (
+                      <div key={event.id} className="explore-card" onClick={() => handleSelectEvent(event)} style={{background: theme.panel, borderColor: theme.border, transition: 'all 0.4s ease'}}>
+                        <img src={event.image} style={{width: '100%', height: 150, objectFit: 'cover'}} alt=""/>
+                        <div style={{padding: 15}}><div style={{fontWeight: 'bold', fontSize: 12}}>{event.name}</div></div>
+                      </div>
+                    ))}
+                 </div>
+               )}
             </div>
           ) : activeTab === 'inventory' ? (
             <>
