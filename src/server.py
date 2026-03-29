@@ -84,7 +84,7 @@ def run_hybrid_discovery(event_id, url):
             _, proxies = get_random_proxy()
             r = cffi_requests.get(ctx["url"], headers=ctx["headers"], cookies=ctx["cookies"], proxies=proxies, timeout=10, impersonate="chrome124")
             if r.status_code == 200: return parse_tm_data(r.json())
-        except: pass
+        except Exception: pass
 
     c_proxy, _ = get_random_proxy()
     ctx_new = {"url": None, "headers": {}, "cookies": {}}
@@ -112,19 +112,22 @@ async def start_always_on_monitor(event_id, url):
     if event_id in active_monitors: return
     active_monitors.add(event_id)
     await send_sys_log(f"Monitor Started: {event_id}")
-    while True:
-        try:
-            tickets = await asyncio.get_event_loop().run_in_executor(None, run_hybrid_discovery, event_id, url)
-            if tickets:
-                await process_differential(event_id, tickets)
-                await sio.emit('inventory_sync', {'event_id': event_id, 'tickets': tickets})
-            await asyncio.sleep(8) 
-        except Exception as e:
-            if event_id in REQUEST_CACHE: del REQUEST_CACHE[event_id]
-            await asyncio.sleep(5)
+    try:
+        while event_id in active_monitors:
+            try:
+                tickets = await asyncio.get_event_loop().run_in_executor(None, run_hybrid_discovery, event_id, url)
+                if tickets:
+                    await process_differential(event_id, tickets)
+                    await sio.emit('inventory_sync', {'event_id': event_id, 'tickets': tickets})
+                await asyncio.sleep(8) 
+            except Exception as e:
+                await send_sys_log(f"Monitor error [{event_id}]: {e}", "ERR")
+                if event_id in REQUEST_CACHE: del REQUEST_CACHE[event_id]
+                await asyncio.sleep(5)
+    finally:
+        active_monitors.discard(event_id)
 
 async def process_differential(event_id, current_tickets):
-    global last_inventory
     if event_id not in last_inventory:
         last_inventory[event_id] = {t['OFFER_ID']: t for t in current_tickets}
         return
@@ -132,7 +135,7 @@ async def process_differential(event_id, current_tickets):
     current_map = {t['OFFER_ID']: t for t in current_tickets}
     for oid, ticket in old_map.items():
         if oid not in current_map:
-            await sio.emit('log', {'msg': f"SOLD: Sec {ticket['SEC']} Row {ticket['ROW']}", 'type': 'SOLD', 'time': datetime.datetime.now().strftime("%H:%M:%S")})
+            await sio.emit('log', {'msg': f"SOLD: Sec {ticket['SEC']} Row {ticket['ROW']} ${ticket['TOTAL']:.2f}", 'type': 'SOLD', 'time': datetime.datetime.now().strftime("%H:%M:%S")})
     last_inventory[event_id] = current_map
 
 @app.get("/api/explore")
@@ -143,7 +146,7 @@ def explore(genre: str = "All"):
         r = requests.get(url).json()
         events = r.get('_embedded', {}).get('events', [])
         return [{"id": e['id'], "name": e['name'], "url": e.get('url'), "image": next((i['url'] for i in e.get('images', []) if i.get('ratio') == '4_3'), ""), "city": e.get('_embedded', {}).get('venues', [{}])[0].get('city', {}).get('name', 'Unknown'), "date": e.get('dates', {}).get('start', {}).get('localDate', '9999-12-31')} for e in events]
-    except: return []
+    except Exception: return []
 
 @app.get("/api/search")
 def search(keyword: str):
@@ -151,11 +154,12 @@ def search(keyword: str):
         r = requests.get(f"https://app.ticketmaster.com/discovery/v2/events.json?keyword={keyword}&apikey={API_KEY}&size=15").json()
         events = r.get('_embedded', {}).get('events', [])
         return [{"id": e['id'], "name": e['name'], "url": e.get('url'), "image": next((i['url'] for i in e.get('images', []) if i.get('ratio') == '4_3'), ""), "city": e.get('_embedded', {}).get('venues', [{}])[0].get('city', {}).get('name', 'Unknown'), "date": e.get('dates', {}).get('start', {}).get('localDate', '9999-12-31')} for e in events]
-    except: return []
+    except Exception: return []
 
 @app.get("/api/scrape")
 async def scrape_trigger(event_id: str, url: str):
-    if event_id not in active_monitors: asyncio.create_task(start_always_on_monitor(event_id, url))
+    if event_id not in active_monitors:
+        asyncio.create_task(start_always_on_monitor(event_id, url))
     return {"status": "Monitoring active"}
 
 if __name__ == "__main__":
