@@ -5,6 +5,7 @@ import os
 import asyncio
 import datetime
 import warnings
+import threading
 import requests
 import socketio
 from dotenv import load_dotenv
@@ -31,6 +32,15 @@ GENRES = {
 REQUEST_CACHE = {} 
 last_inventory = {} 
 active_monitors = set() 
+
+# --- TTL CACHE FOR TM DISCOVERY API ---
+_explore_cache = {}  # key: genre -> (timestamp, data)
+_search_cache = {}   # key: keyword -> (timestamp, data)
+EXPLORE_CACHE_TTL = 60  # seconds
+SEARCH_CACHE_TTL = 30   # seconds
+
+# --- CONNECTION POOL ---
+tm_session = requests.Session()
 
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 app = FastAPI()
@@ -88,6 +98,7 @@ def run_hybrid_discovery(event_id, url):
 
     c_proxy, _ = get_random_proxy()
     ctx_new = {"url": None, "headers": {}, "cookies": {}}
+    intercepted = threading.Event()
     try:
         with Camoufox(proxy=c_proxy, headless=True, humanize=True) as browser:
             page = browser.new_page()
@@ -95,10 +106,11 @@ def run_hybrid_discovery(event_id, url):
                 targets = ["offeradapter", "api/v3/offers", "api/v2/subset"]
                 if any(t in r.url for t in targets) and not ctx_new["url"]:
                     ctx_new.update({"url": r.url, "headers": dict(r.headers)})
+                    intercepted.set()
             
             page.on("request", handle_request)
             page.goto(url, wait_until="commit", timeout=40000)
-            time.sleep(7) 
+            intercepted.wait(timeout=12)
             ctx_new["cookies"] = {c['name']: c['value'] for c in page.context.cookies()}
             if ctx_new["url"]:
                 REQUEST_CACHE[event_id] = ctx_new
@@ -119,7 +131,7 @@ async def start_always_on_monitor(event_id, url):
                 if tickets:
                     await process_differential(event_id, tickets)
                     await sio.emit('inventory_sync', {'event_id': event_id, 'tickets': tickets})
-                await asyncio.sleep(8) 
+                await asyncio.sleep(4) 
             except Exception as e:
                 await send_sys_log(f"Monitor error [{event_id}]: {e}", "ERR")
                 if event_id in REQUEST_CACHE: del REQUEST_CACHE[event_id]
@@ -138,22 +150,40 @@ async def process_differential(event_id, current_tickets):
             await sio.emit('log', {'msg': f"SOLD: Sec {ticket['SEC']} Row {ticket['ROW']} ${ticket['TOTAL']:.2f}", 'type': 'SOLD', 'time': datetime.datetime.now().strftime("%H:%M:%S")})
     last_inventory[event_id] = current_map
 
+def _parse_events(events):
+    return [{"id": e['id'], "name": e['name'], "url": e.get('url'), "image": next((i['url'] for i in e.get('images', []) if i.get('ratio') == '4_3'), ""), "city": e.get('_embedded', {}).get('venues', [{}])[0].get('city', {}).get('name', 'Unknown'), "date": e.get('dates', {}).get('start', {}).get('localDate', '9999-12-31')} for e in events]
+
 @app.get("/api/explore")
 def explore(genre: str = "All"):
+    now = time.time()
+    if genre in _explore_cache:
+        cached_time, cached_data = _explore_cache[genre]
+        if now - cached_time < EXPLORE_CACHE_TTL:
+            return cached_data
     try:
         url = f"https://app.ticketmaster.com/discovery/v2/events.json?classificationName=music&apikey={API_KEY}&size=24&sort=relevance,desc"
         if GENRES.get(genre): url += f"&genreId={GENRES[genre]}"
-        r = requests.get(url).json()
+        r = tm_session.get(url, timeout=10).json()
         events = r.get('_embedded', {}).get('events', [])
-        return [{"id": e['id'], "name": e['name'], "url": e.get('url'), "image": next((i['url'] for i in e.get('images', []) if i.get('ratio') == '4_3'), ""), "city": e.get('_embedded', {}).get('venues', [{}])[0].get('city', {}).get('name', 'Unknown'), "date": e.get('dates', {}).get('start', {}).get('localDate', '9999-12-31')} for e in events]
+        result = _parse_events(events)
+        _explore_cache[genre] = (now, result)
+        return result
     except Exception: return []
 
 @app.get("/api/search")
 def search(keyword: str):
+    now = time.time()
+    cache_key = keyword.lower().strip()
+    if cache_key in _search_cache:
+        cached_time, cached_data = _search_cache[cache_key]
+        if now - cached_time < SEARCH_CACHE_TTL:
+            return cached_data
     try:
-        r = requests.get(f"https://app.ticketmaster.com/discovery/v2/events.json?keyword={keyword}&apikey={API_KEY}&size=15").json()
+        r = tm_session.get(f"https://app.ticketmaster.com/discovery/v2/events.json?keyword={keyword}&apikey={API_KEY}&size=15", timeout=10).json()
         events = r.get('_embedded', {}).get('events', [])
-        return [{"id": e['id'], "name": e['name'], "url": e.get('url'), "image": next((i['url'] for i in e.get('images', []) if i.get('ratio') == '4_3'), ""), "city": e.get('_embedded', {}).get('venues', [{}])[0].get('city', {}).get('name', 'Unknown'), "date": e.get('dates', {}).get('start', {}).get('localDate', '9999-12-31')} for e in events]
+        result = _parse_events(events)
+        _search_cache[cache_key] = (now, result)
+        return result
     except Exception: return []
 
 @app.get("/api/scrape")
