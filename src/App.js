@@ -48,13 +48,17 @@ export default function App() {
   };
 
   useEffect(() => {
+    const controller = new AbortController();
     setLoading(true);
-    fetch(`http://localhost:8000/api/explore?genre=${selectedGenre}`)
+    fetch(`http://localhost:8000/api/explore?genre=${selectedGenre}`, { signal: controller.signal })
       .then(res => res.json())
       .then(data => { 
         setExploreEvents(data); 
         setTrendingEvents(data.slice(0, 5)); 
         setLoading(false); 
+      })
+      .catch(err => {
+        if (err.name !== 'AbortError') setLoading(false);
       });
 
     socket.on('connect', () => setIsConnected(true));
@@ -80,7 +84,8 @@ export default function App() {
     const handleClickOutside = (e) => { if (searchRef.current && !searchRef.current.contains(e.target)) setShowSearchDrop(false); };
     document.addEventListener("mousedown", handleClickOutside);
     return () => {
-      socket.off('connect'); socket.off('inventory_sync'); socket.off('log');
+      controller.abort();
+      socket.off('connect'); socket.off('disconnect'); socket.off('inventory_sync'); socket.off('log');
       document.removeEventListener("mousedown", handleClickOutside);
     };
   }, [selectedEvent?.id, selectedGenre]);
@@ -94,7 +99,8 @@ export default function App() {
     setShowSearchDrop(false);
     setTickets([]); 
     setActiveTab('inventory');
-    fetch(`http://localhost:8000/api/scrape?event_id=${event.id}&url=${encodeURIComponent(event.url)}`);
+    fetch(`http://localhost:8000/api/scrape?event_id=${event.id}&url=${encodeURIComponent(event.url)}`)
+      .catch(() => {});
   };
 
   const handleQuickCheckout = (ticket) => {
@@ -108,11 +114,14 @@ export default function App() {
   const searchEvents = async () => {
     if (!query) return;
     setLoading(true);
+    setEvents([]);
     setShowSearchDrop(true); 
     try {
       const res = await fetch(`http://localhost:8000/api/search?keyword=${query}`);
       const data = await res.json();
       setEvents(data);
+    } catch {
+      setEvents([]);
     } finally { setLoading(false); }
   };
 
