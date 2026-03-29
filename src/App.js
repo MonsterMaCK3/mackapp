@@ -38,6 +38,7 @@ export default function App() {
 
   const [activeTab, setActiveTab] = useState('explore'); 
   const [showSearchDrop, setShowSearchDrop] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
   const searchRef = useRef(null);
 
   const genres = ["All", "Rock", "Pop", "Hip-Hop", "Electronic", "Country", "Metal"];
@@ -138,6 +139,7 @@ export default function App() {
   const searchEvents = async () => {
     if (!query) return;
     setEvents([]);
+    setHasSearched(true);
     setSearchLoading(true);
     setShowSearchDrop(true); 
     try {
@@ -193,7 +195,7 @@ export default function App() {
             style={{...styles.searchInput, background: theme.input, color: theme.text, borderColor: theme.border, transition: 'all 0.5s ease'}}
             value={query}
             onFocus={() => setShowSearchDrop(true)}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => { setQuery(e.target.value); setHasSearched(false); }}
             onKeyDown={(e) => e.key === 'Enter' && searchEvents()}
           />
           {showSearchDrop && (
@@ -219,7 +221,9 @@ export default function App() {
                     </div>
                   </div>
                 )) : (
-                  <div style={{padding: 25, textAlign: 'center', fontSize: 11, color: theme.mute}}>Press Enter to search</div>
+                  <div style={{padding: 25, textAlign: 'center', fontSize: 11, color: theme.mute}}>
+                    {hasSearched ? 'No results found' : 'Press Enter to search'}
+                  </div>
                 )
               ) : (
                 <>
